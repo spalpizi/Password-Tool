@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Password Encryptor AES</title>
+<style>
+:root{color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:#0f0f10;color:#fff;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif}
+main{max-width:720px;margin:auto;padding:24px 18px calc(32px + env(safe-area-inset-bottom))}
+h1{font-size:25px;margin:0 0 6px}
+.sub{color:#aaa;margin:0 0 18px;line-height:1.4}
+.banner{display:none;padding:12px 14px;border-radius:12px;margin:0 0 16px;line-height:1.4}
+.ok{display:block;background:#12281a;color:#a7efbb;border:1px solid #285d37}
+.err{display:block;background:#321718;color:#ffb0b0;border:1px solid #713334}
+label{display:block;margin:16px 0 7px;color:#bbb;font-size:14px}
+textarea,input{width:100%;border:1px solid #343438;border-radius:13px;background:#1b1b1d;color:#fff;padding:13px;font-size:16px}
+textarea{min-height:125px;resize:vertical;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.passrow{display:grid;grid-template-columns:1fr auto;gap:8px}
+button{border:0;border-radius:12px;padding:13px 14px;font-size:16px;font-weight:700;cursor:pointer}
+.primary{background:#fff;color:#111}
+.secondary{background:#29292c;color:#fff}
+.actions{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:14px}
+.full{width:100%;margin-top:10px}
+#status{min-height:22px;margin:12px 0 0;font-size:14px}
+.note{margin-top:18px;padding:12px 14px;border:1px solid #2d2d30;border-radius:12px;background:#171719;color:#aaa;font-size:13px;line-height:1.45}
+code{word-break:break-all}
+</style>
+</head>
+<body>
+<main>
+  <h1>Password Encryptor</h1>
+  <p class="sub">AES‑256‑GCM locale. Il testo non viene inviato a server esterni.</p>
+
+  <div id="env" class="banner"></div>
+
+  <label for="input">Testo da cifrare / stringa cifrata</label>
+  <textarea id="input" autocapitalize="off" autocomplete="off" spellcheck="false"
+    placeholder="Password oppure enc:v1:..."></textarea>
+
+  <label for="master">Password master</label>
+  <div class="passrow">
+    <input id="master" type="password" autocomplete="off" placeholder="Password master">
+    <button type="button" class="secondary" id="toggleBtn">Mostra</button>
+  </div>
+
+  <div class="actions">
+    <button type="button" class="primary" id="encryptBtn">Cifra</button>
+    <button type="button" class="secondary" id="decryptBtn">Decifra</button>
+  </div>
+
+  <label for="output">Risultato</label>
+  <textarea id="output" readonly placeholder="Risultato"></textarea>
+
+  <button type="button" class="secondary full" id="copyBtn">Copia risultato</button>
+  <button type="button" class="secondary full" id="clearBtn">Pulisci tutto</button>
+
+  <div id="status"></div>
+
+  <div class="note">
+    <strong>Formato:</strong> <code>enc:v1:salt:iv:ciphertext</code><br>
+    AES‑256‑GCM · PBKDF2-HMAC-SHA-256 · 250.000 iterazioni · salt 16 byte · IV 12 byte.
+  </div>
+</main>
+
+<script>
+(function () {
+  "use strict";
+
+  var input = document.getElementById("input");
+  var master = document.getElementById("master");
+  var output = document.getElementById("output");
+  var statusEl = document.getElementById("status");
+  var env = document.getElementById("env");
+  var toggleBtn = document.getElementById("toggleBtn");
+
+  function setStatus(text, error) {
+    statusEl.textContent = text || "";
+    statusEl.style.color = error ? "#ff9e9e" : "#9ee9ad";
+  }
+
+  function showEnv(text, good) {
+    env.textContent = text;
+    env.className = "banner " + (good ? "ok" : "err");
+  }
+
+  function hasCrypto() {
+    return !!(window.crypto && window.crypto.subtle && window.TextEncoder && window.TextDecoder);
+  }
+
+  if (!hasCrypto()) {
+    showEnv(
+      "Web Crypto non disponibile. Su iPhone questo succede normalmente se il file HTML viene aperto nell'anteprima dell'app File/Quick Look. Apri questa pagina tramite Safari da un sito HTTPS.",
+      false
+    );
+  } else {
+    showEnv("Ambiente compatibile: JavaScript e Web Crypto sono attivi.", true);
+  }
+
+  var encoder = window.TextEncoder ? new TextEncoder() : null;
+  var decoder = window.TextDecoder ? new TextDecoder() : null;
+
+  function bytesToB64(bytes) {
+    var binary = "";
+    for (var i = 0; i < bytes.length; i++) {
+      binary += String.fromCharCode(bytes[i]);
+    }
+    return btoa(binary);
+  }
+
+  function b64ToBytes(s) {
+    var binary = atob(s);
+    var bytes = new Uint8Array(binary.length);
+    for (var i = 0; i < binary.length; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return bytes;
+  }
+
+  async function deriveKey(password, salt) {
+    var baseKey = await crypto.subtle.importKey(
+      "raw",
+      encoder.encode(password),
+      {name:"PBKDF2"},
+      false,
+      ["deriveKey"]
+    );
+
+    return crypto.subtle.deriveKey(
+      {
+        name:"PBKDF2",
+        salt:salt,
+        iterations:250000,
+        hash:"SHA-256"
+      },
+      baseKey,
+      {name:"AES-GCM", length:256},
+      false,
+      ["encrypt","decrypt"]
+    );
+  }
+
+  async function encryptText() {
+    if (!hasCrypto()) {
+      setStatus("Impossibile cifrare in questo ambiente: Web Crypto non disponibile.", true);
+      return;
+    }
+
+    var plaintext = input.value;
+    var password = master.value;
+
+    if (!plaintext) {
+      setStatus("Inserisci il testo da cifrare.", true);
+      return;
+    }
+    if (!password) {
+      setStatus("Inserisci la password master.", true);
+      return;
+    }
+
+    try {
+      setStatus("Cifratura in corso…", false);
+
+      var salt = crypto.getRandomValues(new Uint8Array(16));
+      var iv = crypto.getRandomValues(new Uint8Array(12));
+      var key = await deriveKey(password, salt);
+
+      var encrypted = await crypto.subtle.encrypt(
+        {name:"AES-GCM", iv:iv},
+        key,
+        encoder.encode(plaintext)
+      );
+
+      output.value =
+        "enc:v1:" +
+        bytesToB64(salt) + ":" +
+        bytesToB64(iv) + ":" +
+        bytesToB64(new Uint8Array(encrypted));
+
+      setStatus("Cifratura completata.", false);
+    } catch (e) {
+      output.value = "";
+      setStatus("Errore durante la cifratura: " + (e && e.message ? e.message : e), true);
+    }
+  }
+
+  async function decryptText() {
+    if (!hasCrypto()) {
+      setStatus("Impossibile decifrare in questo ambiente: Web Crypto non disponibile.", true);
+      return;
+    }
+
+    var value = input.value.trim();
+    var password = master.value;
+
+    if (!value) {
+      setStatus("Inserisci la stringa cifrata.", true);
+      return;
+    }
+    if (!password) {
+      setStatus("Inserisci la password master.", true);
+      return;
+    }
+
+    try {
+      var parts = value.split(":");
+      if (parts.length !== 5 || parts[0] !== "enc" || parts[1] !== "v1") {
+        throw new Error("formato non valido");
+      }
+
+      var salt = b64ToBytes(parts[2]);
+      var iv = b64ToBytes(parts[3]);
+      var ciphertext = b64ToBytes(parts[4]);
+      var key = await deriveKey(password, salt);
+
+      var decrypted = await crypto.subtle.decrypt(
+        {name:"AES-GCM", iv:iv},
+        key,
+        ciphertext
+      );
+
+      output.value = decoder.decode(decrypted);
+      setStatus("Decifratura completata.", false);
+    } catch (e) {
+      output.value = "";
+      setStatus("Master password errata oppure stringa cifrata non valida.", true);
+    }
+  }
+
+  function togglePassword() {
+    if (master.type === "password") {
+      master.type = "text";
+      toggleBtn.textContent = "Nascondi";
+    } else {
+      master.type = "password";
+      toggleBtn.textContent = "Mostra";
+    }
+  }
+
+  async function copyResult() {
+    if (!output.value) {
+      setStatus("Non c'è alcun risultato da copiare.", true);
+      return;
+    }
+
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(output.value);
+      } else {
+        output.removeAttribute("readonly");
+        output.select();
+        document.execCommand("copy");
+        output.setAttribute("readonly", "");
+      }
+      setStatus("Risultato copiato negli appunti.", false);
+    } catch (e) {
+      setStatus("Copia automatica non consentita. Seleziona il risultato e copialo manualmente.", true);
+    }
+  }
+
+  function clearAll() {
+    input.value = "";
+    master.value = "";
+    output.value = "";
+    master.type = "password";
+    toggleBtn.textContent = "Mostra";
+    setStatus("Dati rimossi dalla pagina.", false);
+    input.focus();
+  }
+
+  document.getElementById("encryptBtn").onclick = encryptText;
+  document.getElementById("decryptBtn").onclick = decryptText;
+  document.getElementById("copyBtn").onclick = copyResult;
+  document.getElementById("clearBtn").onclick = clearAll;
+  toggleBtn.onclick = togglePassword;
+})();
+</script>
+</body>
+</html>
